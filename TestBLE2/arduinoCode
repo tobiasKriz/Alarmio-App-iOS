@@ -1,0 +1,249 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_ADDR 0x3C  // Change if your scanner shows 0x3D
+
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define ALARM_UUID          "beb5483e-36e1-4688-b7f5-ea07361b26a9" // New UUID for alarm
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+int hours = 0, minutes = 0, seconds = 0;
+bool timeSet = false;
+unsigned long lastUpdate = 0;
+
+// Alarm variables
+int alarmHour = -1, alarmMinute = -1, alarmSecond = -1;
+bool alarmEnabled = false;
+bool alarmTriggered = false;
+unsigned long lastFlash = 0;
+bool flashState = false;
+
+BLEServer *pServer;
+BLEAdvertising *pAdvertising;
+bool deviceConnected = false;
+
+// ==== Display time ====
+void showTime() {
+  display.clearDisplay();
+  display.setTextSize(2);   // font size 2 as requested
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(10, 25);
+  char buffer[9];
+  sprintf(buffer, "%02d:%02d:%02d", hours, minutes, seconds);
+  display.println(buffer);
+  
+  // Show alarm status
+  if (alarmEnabled) {
+    display.setTextSize(1);
+    display.setCursor(10, 50);
+    char alarmBuffer[15];
+    sprintf(alarmBuffer, "Alarm: %02d:%02d:%02d", alarmHour, alarmMinute, alarmSecond);
+    display.println(alarmBuffer);
+  }
+  
+  display.display();
+}
+
+// ==== Flash screen for alarm ====
+void flashScreen() {
+  if (!alarmTriggered) return;
+  
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastFlash >= 500) {  // Flash every 500ms
+    lastFlash = currentMillis;
+    flashState = !flashState;
+    
+    display.clearDisplay();
+    if (flashState) {
+      // Fill screen white when flashing
+      display.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    
+    display.setTextSize(2);
+    display.setCursor(10, 15);
+    display.println("ALARM!");
+    display.setTextSize(2);
+    display.setCursor(10, 40);
+    char buffer[9];
+    sprintf(buffer, "%02d:%02d:%02d", hours, minutes, seconds);
+    display.println(buffer);
+    display.display();
+  }
+}
+
+// ==== Check if alarm should trigger ====
+void checkAlarm() {
+  if (alarmEnabled && !alarmTriggered && 
+      hours == alarmHour && minutes == alarmMinute && seconds == alarmSecond) {
+    alarmTriggered = true;
+    lastFlash = millis();
+    Serial.println("ALARM TRIGGERED!");
+  }
+}
+
+// ==== Increment time each second ====
+void tick() {
+  seconds++;
+  if (seconds >= 60) {
+    seconds = 0;
+    minutes++;
+    if (minutes >= 60) {
+      minutes = 0;
+      hours++;
+      if (hours >= 24) hours = 0;
+    }
+  }
+  
+  checkAlarm();
+}
+
+// ==== BLE characteristic callback ====
+class MyCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      Serial.print("Received: ");
+      Serial.println(value);
+
+      int h, m, s;
+      if (sscanf(value.c_str(), "%d:%d:%d", &h, &m, &s) == 3) {
+        hours = h;
+        minutes = m;
+        seconds = s;
+        timeSet = true;
+        showTime();
+        Serial.printf("Time set to %02d:%02d:%02d\n", hours, minutes, seconds);
+      } else {
+        Serial.println("Invalid time format. Expected HH:MM:SS");
+      }
+    }
+  }
+};
+
+// ==== BLE alarm characteristic callback ====
+class AlarmCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      Serial.print("Received alarm: ");
+      Serial.println(value);
+
+      // Command format: SET:HH:MM:SS or OFF or DISMISS
+      if (value.startsWith("SET:")) {
+        int h, m, s;
+        if (sscanf(value.c_str() + 4, "%d:%d:%d", &h, &m, &s) == 3) {
+          alarmHour = h;
+          alarmMinute = m;
+          alarmSecond = s;
+          alarmEnabled = true;
+          alarmTriggered = false;
+          
+          Serial.printf("Alarm set to %02d:%02d:%02d\n", alarmHour, alarmMinute, alarmSecond);
+          showTime(); // Update display to show alarm
+        }
+      } else if (value == "OFF") {
+        alarmEnabled = false;
+        alarmTriggered = false;
+        Serial.println("Alarm disabled");
+        showTime();
+      } else if (value == "DISMISS") {
+        alarmTriggered = false;
+        Serial.println("Alarm dismissed");
+        showTime();
+      }
+    }
+  }
+};
+
+// ==== BLE server callback ====
+class MyServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *pServer) override {
+    deviceConnected = true;
+    Serial.println("BLE device connected");
+  }
+
+  void onDisconnect(BLEServer *pServer) override {
+    deviceConnected = false;
+    Serial.println("BLE device disconnected. Restarting advertising...");
+    delay(100);  // small delay helps re-advertising stability
+    pAdvertising->start();
+    Serial.println("Advertising restarted");
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Starting BLE Clock...");
+
+  // ==== Init I2C & OLED ====
+  Wire.begin(8, 9);  // SDA=8, SCL=9 for ESP32-C3
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("SSD1306 allocation failed!");
+    while (true);
+  }
+  
+  // Show initial time (00:00:00)
+  showTime();
+
+  // ==== Init BLE ====
+  BLEDevice::init("ESP32 BLE Clock");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  
+  // Time characteristic
+  BLECharacteristic *pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pCharacteristic->setCallbacks(new MyCallbacks());
+  pCharacteristic->setValue("Send time as HH:MM:SS");
+  
+  // Alarm characteristic
+  BLECharacteristic *pAlarmCharacteristic = pService->createCharacteristic(
+    ALARM_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pAlarmCharacteristic->setCallbacks(new AlarmCallbacks());
+  pAlarmCharacteristic->setValue("Send alarm as SET:HH:MM:SS or OFF");
+  
+  pService->start();
+
+  pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMinPreferred(0x12);
+  pAdvertising->start();
+
+  Serial.println("BLE advertising started. Waiting for connection...");
+}
+
+void loop() {
+  unsigned long now = millis();
+  
+  // Always update time every second, even if not set via BLE
+  if (now - lastUpdate >= 1000) {
+    lastUpdate = now;
+    tick();
+    if (!alarmTriggered) {
+      showTime();
+    }
+  }
+  
+  if (alarmTriggered) {
+    flashScreen();
+  }
+}
