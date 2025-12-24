@@ -1,95 +1,519 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <U8g2lib.h>
+#include <SPI.h>
+
+// Custom font arrays (generated from your provided files)
+extern const uint8_t unifont_custom[];   // Maniac-derived
+extern const uint8_t unifont_custom2[];  // BubblePark-derived
 
 #define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_ADDR 0x3C  // Change if your scanner shows 0x3D
+#define SCREEN_HEIGHT 128
+#define BUTTON_PIN 9  // GPIO 9 for dismissing alarms and timer
 
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define ALARM_UUID          "beb5483e-36e1-4688-b7f5-ea07361b26a9" // New UUID for alarm
+#define DATE_UUID           "beb5483e-36e1-4688-b7f5-ea07361b26aa" // New UUID for date/time
+#define FONT_UUID           "beb5483e-36e1-4688-b7f5-ea07361b26ab" // New UUID for font selection
+#define CUSTOM_FONT_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26ac" // New UUID for custom font data
+#define TIMER_UUID          "beb5483e-36e1-4688-b7f5-ea07361b26ad" // New UUID for timer
+#define STOPWATCH_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26ae" // New UUID for stopwatch
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+// Initialize U8G2 for SH1107 128x128 display with SPI connection
+U8G2_SH1107_PIMORONI_128X128_1_4W_HW_SPI u8g2(U8G2_R0, /*cs*/7, /*dc*/ 0, /*reset*/ 1);
 
+// Time variables
 int hours = 0, minutes = 0, seconds = 0;
 bool timeSet = false;
 unsigned long lastUpdate = 0;
 
-// Alarm variables
-int alarmHour = -1, alarmMinute = -1, alarmSecond = -1;
-bool alarmEnabled = false;
-bool alarmTriggered = false;
+// Date variables
+int year = 2025, month = 11, day = 15;
+int dayOfWeek = 5; // 0=Sunday, 1=Monday, ..., 6=Saturday (Friday Nov 15, 2025)
+bool dateSet = false;
+
+// Day names
+const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+const char* monthNames[] = {"", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+// Font selection (0=Inline, 1=Painted)
+int selectedTimeFont = 0;  // Default to Inline
+
+// Custom painted font storage
+#define MAX_CUSTOM_FONT_SIZE 5000
+uint8_t customPaintedFont[MAX_CUSTOM_FONT_SIZE];
+int customFontSize = 0;
+bool customFontLoaded = false;
+
+// Custom font reception state
+struct CustomFontTransfer {
+  bool receiving = false;
+  int totalBytes = 0;
+  int totalChunks = 0;
+  int receivedBytes = 0;
+  int receivedChunks = 0;
+} fontTransfer;
+
+// Multiple alarm support (up to 5 alarms)
+#define MAX_ALARMS 5
+struct Alarm {
+  int hour, minute, second;
+  bool enabled;
+  bool triggered;
+  int repeatDays; // Bitmask: bit 0=Sunday, bit 1=Monday, etc.
+  char name[16];
+};
+
+Alarm alarms[MAX_ALARMS];
+int activeAlarms = 0;
 unsigned long lastFlash = 0;
 bool flashState = false;
+bool anyAlarmTriggered = false;
 
 BLEServer *pServer;
 BLEAdvertising *pAdvertising;
 bool deviceConnected = false;
 
-// ==== Display time ====
+// Display modes
+enum DisplayMode {
+  MODE_CLOCK,
+  MODE_TIMER,
+  MODE_STOPWATCH
+};
+
+DisplayMode currentMode = MODE_CLOCK;
+
+// Timer variables
+int timerHours = 0, timerMinutes = 0, timerSeconds = 0;
+bool timerRunning = false;
+bool timerFinished = false;
+unsigned long timerLastUpdate = 0;
+
+// Stopwatch variables
+int stopwatchHours = 0, stopwatchMinutes = 0, stopwatchSeconds = 0;
+bool stopwatchRunning = false;
+unsigned long stopwatchLastUpdate = 0;
+
+// ==== Display time with date ====
 void showTime() {
-  display.clearDisplay();
-  display.setTextSize(2);   // font size 2 as requested
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(10, 25);
-  char buffer[9];
-  sprintf(buffer, "%02d:%02d:%02d", hours, minutes, seconds);
-  display.println(buffer);
+    u8g2.firstPage();
+    do {
+        // Draw thin border at the edge
+        u8g2.setDrawColor(1);
+        u8g2.drawRFrame(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 2);
+        
+        // Set font mode for proper text rendering
+        u8g2.setFontMode(1);
+
+        // Display time - unified layout for all fonts
+        if (selectedTimeFont == 1 && customFontLoaded && customFontSize > 16) {
+          // Custom painted font - draw digits as bitmaps
+          char timeBuffer[6];
+          sprintf(timeBuffer, "%02d:%02d", hours, minutes);
+          
+          int digitWidth = 24;
+          int digitHeight = 40;
+          int bytesPerRow = 3;  // (24 + 7) / 8 = 3
+          int bytesPerDigit = bytesPerRow * digitHeight;  // 120 bytes per digit
+          int spacing = 2;
+          int colonWidth = 6;
+          
+          // Calculate total width and starting X position
+          int totalWidth = digitWidth * 4 + spacing * 3 + colonWidth;
+          int startX = (SCREEN_WIDTH - totalWidth) / 2;
+          int digitY = 50;  // Lower on screen
+          
+          // Draw each character
+          for (int i = 0; i < 5; i++) {
+            if (timeBuffer[i] == ':') {
+              // Draw colon as two dots
+              u8g2.drawDisc(startX + 2, digitY + 12, 2);
+              u8g2.drawDisc(startX + 2, digitY + 28, 2);
+              startX += colonWidth + spacing;
+            } else {
+              // Draw digit bitmap
+              int digit = timeBuffer[i] - '0';
+              uint8_t* digitData = customPaintedFont + 16 + (digit * bytesPerDigit);
+              u8g2.drawXBM(startX, digitY, digitWidth, digitHeight, digitData);
+              startX += digitWidth + spacing;
+            }
+          }
+        } else {
+          // Use regular fonts - same layout as painted font
+          switch(selectedTimeFont) {
+            case 0: u8g2.setFont(u8g2_font_inb27_mr); break;  // Inline (default)
+            case 1: u8g2.setFont(u8g2_font_inb27_mr); break;  // Painted (fallback to Inline if not loaded)
+            default: u8g2.setFont(u8g2_font_inb27_mr);
+          }
+          char timeBuffer[6];
+          sprintf(timeBuffer, "%02d:%02d", hours, minutes);
+          int timeTextWidth = u8g2.getStrWidth(timeBuffer);
+          int timeX = (SCREEN_WIDTH - timeTextWidth) / 2;
+          u8g2.drawStr(timeX, 75, timeBuffer);  // Lower position (was 25)
+        }
+
+        // Display date and day - bigger font
+        if (dateSet) {
+            u8g2.setFont(u8g2_font_profont17_tr);  // Bigger font (was profont12_tr)
+            char dateDayBuffer[32];
+            sprintf(dateDayBuffer, "%s %d,%s", monthNames[month], day, dayNames[dayOfWeek]);  // Removed space after comma
+            int dateDayWidth = u8g2.getStrWidth(dateDayBuffer);
+            int dateDayX = (SCREEN_WIDTH - dateDayWidth) / 2;
+            u8g2.drawStr(dateDayX, 25, dateDayBuffer);  // Higher position (was 40)
+        }
+
+        // Show active alarms count - bigger font
+        int enabledCount = 0;
+        for (int i = 0; i < activeAlarms; i++) {
+            if (alarms[i].enabled) enabledCount++;
+        }
+
+        if (enabledCount > 0) {
+            u8g2.setFont(u8g2_font_profont15_tr);  // Bigger font (was profont10_tr)
+            char alarmStatus[20];
+            sprintf(alarmStatus, "%d alarm%s set", enabledCount, enabledCount > 1 ? "s" : "");
+            int alarmStatusWidth = u8g2.getStrWidth(alarmStatus);
+            int alarmStatusX = (SCREEN_WIDTH - alarmStatusWidth) / 2;
+            u8g2.drawStr(alarmStatusX, 100, alarmStatus);  // Lower position (was 60)
+
+            // Show next alarm
+            int nextAlarmIndex = getNextAlarm();
+            if (nextAlarmIndex >= 0) {
+                char nextAlarmBuffer[20];
+                sprintf(nextAlarmBuffer, "Next: %02d:%02d", alarms[nextAlarmIndex].hour, alarms[nextAlarmIndex].minute);
+                int nextAlarmWidth = u8g2.getStrWidth(nextAlarmBuffer);
+                int nextAlarmX = (SCREEN_WIDTH - nextAlarmWidth) / 2;
+                u8g2.drawStr(nextAlarmX, 115, nextAlarmBuffer);  // Lower position (was 72)
+            }
+
+            // Add alarm indicator dots
+            for (int i = 0; i < min(enabledCount, 5); i++) {
+                u8g2.drawDisc(54 + i * 6, 120, 1);  // Lower position (was 80)
+            }
+        }
+
+        // Add seconds indicator animation
+        int numDots = (seconds % 6) + 1;
+        for (int i = 0; i < numDots; i++) {
+            u8g2.drawDisc(10 + i * 4, 120, 1);
+        }
+
+        // Show BLE connection status
+        u8g2.setFont(u8g2_font_micro_tr);
+        if (deviceConnected) {
+            u8g2.drawStr(5, 125, "BLE");
+            u8g2.drawDisc(25, 122, 2);  // Connected indicator
+        } else {
+            u8g2.drawStr(5, 125, "---");
+        }
+
+        // Show time/date status
+        if (!timeSet) {
+            u8g2.drawStr(SCREEN_WIDTH-30, 125, "TIME?");
+        } else if (!dateSet) {
+            u8g2.drawStr(SCREEN_WIDTH-30, 125, "DATE?");
+        }
+    } while (u8g2.nextPage());
+}
+
+// ==== Display timer ====
+void showTimer() {
+    u8g2.firstPage();
+    do {
+        u8g2.setDrawColor(1);
+        u8g2.drawRFrame(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 2);
+        u8g2.setFontMode(1);
+
+        // Title
+        u8g2.setFont(u8g2_font_profont22_tr);  // Bigger font
+        const char* title = "TIMER";
+        int titleWidth = u8g2.getStrWidth(title);
+        u8g2.drawStr((SCREEN_WIDTH - titleWidth) / 2, 40, title);
+
+        // Calculate progress for ring
+        int totalSeconds = timerHours * 3600 + timerMinutes * 60 + timerSeconds;
+        static int startTotalSeconds = 0;
+        if (!timerRunning && totalSeconds > 0 && startTotalSeconds == 0) {
+            startTotalSeconds = totalSeconds;
+        }
+        if (timerFinished || totalSeconds == 0) {
+            startTotalSeconds = 0;
+        }
+        
+        // Draw progress ring (larger, stretched to sides)
+        int centerX = SCREEN_WIDTH / 2;
+        int centerY = 68;
+        int radius = 56;
+        
+        if (startTotalSeconds > 0 && totalSeconds > 0) {
+            float progress = (float)totalSeconds / (float)startTotalSeconds;
+            int arcLength = (int)(360 * progress);
+            
+            // Draw progress arc (approximated with lines)
+            for (int angle = 0; angle < arcLength; angle += 3) {
+                float rad = (angle - 90) * 3.14159 / 180.0;
+                int x = centerX + (int)(radius * cos(rad));
+                int y = centerY + (int)(radius * sin(rad));
+                u8g2.drawDisc(x, y, 2);
+            }
+        }
+        
+        // Draw background circle
+        u8g2.drawCircle(centerX, centerY, radius);
+
+        // Timer display (MM:SS only) - smaller font to fit in ring
+        u8g2.setFont(u8g2_font_inb24_mr);
+        int displayMinutes = timerHours * 60 + timerMinutes;
+        char timerBuffer[8];
+        sprintf(timerBuffer, "%02d:%02d", displayMinutes, timerSeconds);
+        int timerWidth = u8g2.getStrWidth(timerBuffer);
+        u8g2.drawStr((SCREEN_WIDTH - timerWidth) / 2, 78, timerBuffer);  // Lower in ring
+
+        // Add status indicator dots (like clock display)
+        int numDots = (timerSeconds % 6) + 1;
+        for (int i = 0; i < numDots; i++) {
+            u8g2.drawDisc(10 + i * 4, 120, 1);
+        }
+
+        // Status
+        u8g2.setFont(u8g2_font_profont12_tr);
+        const char* status = timerFinished ? "FINISHED!" : (timerRunning ? "Running..." : "Paused");
+        int statusWidth = u8g2.getStrWidth(status);
+        u8g2.drawStr((SCREEN_WIDTH - statusWidth) / 2, 110, status);
+
+        // BLE status
+        u8g2.setFont(u8g2_font_micro_tr);
+        if (deviceConnected) {
+            u8g2.drawStr(5, 125, "BLE");
+            u8g2.drawDisc(25, 122, 2);
+        } else {
+            u8g2.drawStr(5, 125, "---");
+        }
+    } while (u8g2.nextPage());
+}
+
+// ==== Display stopwatch ====
+void showStopwatch() {
+    u8g2.firstPage();
+    do {
+        u8g2.setDrawColor(1);
+        u8g2.drawRFrame(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 2);
+        u8g2.setFontMode(1);
+
+        // Title
+        u8g2.setFont(u8g2_font_profont22_tr);  // Bigger font
+        const char* title = "STOPWATCH";
+        int titleWidth = u8g2.getStrWidth(title);
+        u8g2.drawStr((SCREEN_WIDTH - titleWidth) / 2, 25, title);
+
+        // Stopwatch display (MM:SS)
+        u8g2.setFont(u8g2_font_inb24_mr);  // Smaller font to match timer
+        int displayMinutes = stopwatchHours * 60 + stopwatchMinutes;
+        char stopwatchBuffer[8];
+        sprintf(stopwatchBuffer, "%02d:%02d", displayMinutes, stopwatchSeconds);
+        int stopwatchWidth = u8g2.getStrWidth(stopwatchBuffer);
+        u8g2.drawStr((SCREEN_WIDTH - stopwatchWidth) / 2, 80, stopwatchBuffer);
+
+        // Status
+        u8g2.setFont(u8g2_font_profont12_tr);
+        const char* status = stopwatchRunning ? "Running..." : "Stopped";
+        int statusWidth = u8g2.getStrWidth(status);
+        u8g2.drawStr((SCREEN_WIDTH - statusWidth) / 2, 110, status);
+
+        // BLE status
+        u8g2.setFont(u8g2_font_micro_tr);
+        if (deviceConnected) {
+            u8g2.drawStr(5, 125, "BLE");
+            u8g2.drawDisc(25, 122, 2);
+        } else {
+            u8g2.drawStr(5, 125, "---");
+        }
+    } while (u8g2.nextPage());
+}
+
+// ==== Helper functions ====
+int getNextAlarm() {
+  int nextIndex = -1;
+  int shortestTime = 24 * 60 * 60; // Max seconds in a day
   
-  // Show alarm status
-  if (alarmEnabled) {
-    display.setTextSize(1);
-    display.setCursor(10, 50);
-    char alarmBuffer[15];
-    sprintf(alarmBuffer, "Alarm: %02d:%02d:%02d", alarmHour, alarmMinute, alarmSecond);
-    display.println(alarmBuffer);
+  for (int i = 0; i < activeAlarms; i++) {
+    if (!alarms[i].enabled) continue;
+    
+    // Calculate seconds until this alarm
+    int alarmSeconds = alarms[i].hour * 3600 + alarms[i].minute * 60 + alarms[i].second;
+    int currentSeconds = hours * 3600 + minutes * 60 + seconds;
+    int timeUntil = alarmSeconds - currentSeconds;
+    
+    if (timeUntil <= 0) timeUntil += 24 * 60 * 60; // Next day
+    
+    if (timeUntil < shortestTime) {
+      shortestTime = timeUntil;
+      nextIndex = i;
+    }
   }
   
-  display.display();
+  return nextIndex;
+}
+
+bool shouldAlarmTrigger(int index) {
+  if (!alarms[index].enabled) return false;
+  
+  // Check if time matches
+  if (hours != alarms[index].hour || minutes != alarms[index].minute || seconds != alarms[index].second) {
+    return false;
+  }
+  
+  // Check if today matches repeat pattern
+  if (alarms[index].repeatDays == 0) {
+    return true; // One-time alarm
+  }
+  
+  return (alarms[index].repeatDays & (1 << dayOfWeek)) != 0;
+}
+
+// ==== Check button press ====
+bool isButtonPressed() {
+  return digitalRead(BUTTON_PIN) == LOW;  // Button pressed (assuming active LOW)
+}
+
+// ==== Flash screen for timer finished ====
+void flashTimer() {
+  if (!timerFinished) return;
+  
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastFlash >= 300) {  // Flash every 300ms
+    lastFlash = currentMillis;
+    flashState = !flashState;
+    
+    u8g2.firstPage();
+    do {
+      if (flashState) {
+        u8g2.setDrawColor(1);
+        u8g2.drawBox(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+        u8g2.setDrawColor(0);
+      } else {
+        u8g2.setDrawColor(1);
+      }
+      
+      u8g2.setFont(u8g2_font_profont22_tr);
+      u8g2.setFontMode(1);
+      
+      const char* finishedText = "TIME'S UP!";
+      int finishedTextWidth = u8g2.getStrWidth(finishedText);
+      int finishedX = (SCREEN_WIDTH - finishedTextWidth) / 2;
+      u8g2.drawStr(finishedX, 50, finishedText);
+      
+      u8g2.setFont(u8g2_font_profont12_tr);
+      const char* dismissText = "Press button";
+      const char* dismissText2 = "to dismiss";
+      int dismissWidth = u8g2.getStrWidth(dismissText);
+      int dismiss2Width = u8g2.getStrWidth(dismissText2);
+      u8g2.drawStr((SCREEN_WIDTH - dismissWidth) / 2, 80, dismissText);
+      u8g2.drawStr((SCREEN_WIDTH - dismiss2Width) / 2, 95, dismissText2);
+      
+    } while (u8g2.nextPage());
+  }
 }
 
 // ==== Flash screen for alarm ====
 void flashScreen() {
-  if (!alarmTriggered) return;
+  if (!anyAlarmTriggered) return;
   
   unsigned long currentMillis = millis();
-  if (currentMillis - lastFlash >= 500) {  // Flash every 500ms
+  if (currentMillis - lastFlash >= 300) {  // Flash every 300ms
     lastFlash = currentMillis;
     flashState = !flashState;
     
-    display.clearDisplay();
-    if (flashState) {
-      // Fill screen white when flashing
-      display.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
-    } else {
-      display.setTextColor(SSD1306_WHITE);
-    }
-    
-    display.setTextSize(2);
-    display.setCursor(10, 15);
-    display.println("ALARM!");
-    display.setTextSize(2);
-    display.setCursor(10, 40);
-    char buffer[9];
-    sprintf(buffer, "%02d:%02d:%02d", hours, minutes, seconds);
-    display.println(buffer);
-    display.display();
+    u8g2.firstPage();
+    do {
+      if (flashState) {
+        // Fill screen when flashing
+        u8g2.setDrawColor(1);
+        u8g2.drawBox(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+        u8g2.setDrawColor(0);  // Draw text in black on white background
+      } else {
+        u8g2.setDrawColor(1);  // Normal white text
+      }
+      
+      // Display ALARM text
+      u8g2.setFont(u8g2_font_profont22_tr);
+      u8g2.setFontMode(1);
+      
+      // Center "ALARM!" text
+      const char* alarmText = "ALARM!";
+      int alarmTextWidth = u8g2.getStrWidth(alarmText);
+      int alarmX = (SCREEN_WIDTH - alarmTextWidth) / 2;
+      u8g2.drawStr(alarmX, 35, alarmText);
+      
+      // Show which alarm(s) triggered
+      u8g2.setFont(u8g2_font_profont10_tr);
+      for (int i = 0; i < activeAlarms; i++) {
+        if (alarms[i].triggered) {
+          char alarmInfo[25];
+          sprintf(alarmInfo, "%s %02d:%02d", alarms[i].name, alarms[i].hour, alarms[i].minute);
+          int infoWidth = u8g2.getStrWidth(alarmInfo);
+          int infoX = (SCREEN_WIDTH - infoWidth) / 2;
+          u8g2.drawStr(infoX, 55 + i * 12, alarmInfo);
+        }
+      }
+      
+      // Display current time at bottom
+      u8g2.setFont(u8g2_font_profont12_tr);
+      char buffer[9];
+      sprintf(buffer, "%02d:%02d:%02d", hours, minutes, seconds);
+      int timeTextWidth = u8g2.getStrWidth(buffer);
+      int timeX = (SCREEN_WIDTH - timeTextWidth) / 2;
+      u8g2.drawStr(timeX, 95, buffer);
+      
+      // Show dismiss instruction
+      u8g2.setFont(u8g2_font_profont10_tr);
+      const char* dismissText = "Press button";
+      int dismissWidth = u8g2.getStrWidth(dismissText);
+      u8g2.drawStr((SCREEN_WIDTH - dismissWidth) / 2, 110, dismissText);
+      
+    } while (u8g2.nextPage());
   }
 }
 
-// ==== Check if alarm should trigger ====
+// ==== Check if alarms should trigger ====
 void checkAlarm() {
-  if (alarmEnabled && !alarmTriggered && 
-      hours == alarmHour && minutes == alarmMinute && seconds == alarmSecond) {
-    alarmTriggered = true;
-    lastFlash = millis();
-    Serial.println("ALARM TRIGGERED!");
+  anyAlarmTriggered = false;
+  
+  for (int i = 0; i < activeAlarms; i++) {
+    if (shouldAlarmTrigger(i) && !alarms[i].triggered) {
+      alarms[i].triggered = true;
+      anyAlarmTriggered = true;
+      lastFlash = millis();
+      Serial.printf("ALARM TRIGGERED: %s at %02d:%02d:%02d\n",
+                    alarms[i].name, alarms[i].hour, alarms[i].minute, alarms[i].second);
+    }
+    
+    if (alarms[i].triggered) {
+      anyAlarmTriggered = true;
+    }
   }
+}
+
+// ==== Update day of week when date changes ====
+void updateDayOfWeek() {
+  // Simple day of week calculation (Zeller's congruence simplified)
+  // This is approximate - for exact calculation would need more complex algorithm
+  // For our purposes, we'll calculate from a known date
+  
+  // November 15, 2025 is a Friday (dayOfWeek = 5)
+  // Calculate difference in days from this reference
+  int refYear = 2025, refMonth = 11, refDay = 15, refDayOfWeek = 5;
+  
+  // Simple approximation - count total days difference
+  int totalDays = (year - refYear) * 365 + (month - refMonth) * 30 + (day - refDay);
+  
+  // Add leap year adjustments (approximate)
+  totalDays += (year - refYear) / 4;
+  
+  dayOfWeek = (refDayOfWeek + totalDays) % 7;
+  if (dayOfWeek < 0) dayOfWeek += 7;
 }
 
 // ==== Increment time each second ====
@@ -101,11 +525,84 @@ void tick() {
     if (minutes >= 60) {
       minutes = 0;
       hours++;
-      if (hours >= 24) hours = 0;
+      if (hours >= 24) {
+        hours = 0;
+        // Advance date
+        day++;
+        
+        // Simple month length check (approximate)
+        int daysInMonth = 30; // Default
+        if (month == 2) daysInMonth = (year % 4 == 0) ? 29 : 28;
+        else if (month == 1 || month == 3 || month == 5 || month == 7 ||
+                 month == 8 || month == 10 || month == 12) daysInMonth = 31;
+        
+        if (day > daysInMonth) {
+          day = 1;
+          month++;
+          if (month > 12) {
+            month = 1;
+            year++;
+          }
+        }
+        
+        // Update day of week
+        updateDayOfWeek();
+      }
     }
   }
   
   checkAlarm();
+}
+
+// ==== Update timer ====
+void tickTimer() {
+  if (!timerRunning || timerFinished) return;
+  
+  if (timerSeconds > 0) {
+    timerSeconds--;
+  } else if (timerMinutes > 0) {
+    timerSeconds = 59;
+    timerMinutes--;
+  } else if (timerHours > 0) {
+    timerSeconds = 59;
+    timerMinutes = 59;
+    timerHours--;
+  } else {
+    // Timer finished
+    timerRunning = false;
+    timerFinished = true;
+    Serial.println("⏰ Timer finished!");
+    return;
+  }
+  
+  // Check if we just reached 00:00:00
+  if (timerHours == 0 && timerMinutes == 0 && timerSeconds == 0) {
+    timerRunning = false;
+    timerFinished = true;
+    Serial.println("⏰ Timer finished!");
+  }
+}
+
+// ==== Update stopwatch ====
+void tickStopwatch() {
+  if (!stopwatchRunning) return;
+  
+  stopwatchSeconds++;
+  if (stopwatchSeconds >= 60) {
+    stopwatchSeconds = 0;
+    stopwatchMinutes++;
+    if (stopwatchMinutes >= 60) {
+      stopwatchMinutes = 0;
+      stopwatchHours++;
+      if (stopwatchHours >= 100) {
+        // Max 99:59:59
+        stopwatchHours = 99;
+        stopwatchMinutes = 59;
+        stopwatchSeconds = 59;
+        stopwatchRunning = false;
+      }
+    }
+  }
 }
 
 // ==== BLE characteristic callback ====
@@ -113,7 +610,7 @@ class MyCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
     String value = pCharacteristic->getValue();
     if (value.length() > 0) {
-      Serial.print("Received: ");
+      Serial.print("Received time: ");
       Serial.println(value);
 
       int h, m, s;
@@ -122,8 +619,15 @@ class MyCallbacks : public BLECharacteristicCallbacks {
         minutes = m;
         seconds = s;
         timeSet = true;
+        
+        // Reset all triggered alarms when time is updated
+        for (int i = 0; i < activeAlarms; i++) {
+          alarms[i].triggered = false;
+        }
+        anyAlarmTriggered = false;
+        
         showTime();
-        Serial.printf("Time set to %02d:%02d:%02d\n", hours, minutes, seconds);
+        Serial.printf("Time updated to %02d:%02d:%02d\n", hours, minutes, seconds);
       } else {
         Serial.println("Invalid time format. Expected HH:MM:SS");
       }
@@ -136,30 +640,405 @@ class AlarmCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
     String value = pCharacteristic->getValue();
     if (value.length() > 0) {
-      Serial.print("Received alarm: ");
+      Serial.print("Received alarm command: ");
       Serial.println(value);
 
-      // Command format: SET:HH:MM:SS or OFF or DISMISS
-      if (value.startsWith("SET:")) {
+      if (value.startsWith("ADD:")) {
+        // Format: ADD:HH:MM:SS:RepeatDays:Name
+        // Example: ADD:07:30:00:62:Morning (62 = Mon-Fri binary)
+        if (activeAlarms < MAX_ALARMS) {
+          int h, m, s, repeatDays;
+          char name[16] = "";
+          
+          // Parse the command
+          int parsed = sscanf(value.c_str() + 4, "%d:%d:%d:%d:%15s", &h, &m, &s, &repeatDays, name);
+          if (parsed >= 4) {
+            
+            // VALIDATE INPUT TO PREVENT CRASHES
+            if (h < 0 || h > 23) {
+              Serial.printf("ERROR: Invalid alarm hour %d (must be 0-23)\n", h);
+              return;
+            }
+            if (m < 0 || m > 59) {
+              Serial.printf("ERROR: Invalid alarm minute %d (must be 0-59)\n", m);
+              return;
+            }
+            if (s < 0 || s > 59) {
+              Serial.printf("ERROR: Invalid alarm second %d (must be 0-59)\n", s);
+              return;
+            }
+            if (repeatDays < 0 || repeatDays > 127) {
+              Serial.printf("ERROR: Invalid repeat days %d (must be 0-127)\n", repeatDays);
+              return;
+            }
+            
+            // All validation passed
+            alarms[activeAlarms].hour = h;
+            alarms[activeAlarms].minute = m;
+            alarms[activeAlarms].second = s;
+            alarms[activeAlarms].enabled = true;
+            alarms[activeAlarms].triggered = false;
+            alarms[activeAlarms].repeatDays = repeatDays;
+            
+            if (parsed == 5) {
+              strncpy(alarms[activeAlarms].name, name, 15);
+              alarms[activeAlarms].name[15] = '\0';
+            } else {
+              sprintf(alarms[activeAlarms].name, "Alarm%d", activeAlarms + 1);
+            }
+            
+            activeAlarms++;
+            Serial.printf("Added alarm %s: %02d:%02d:%02d, repeat=%d\n",
+                          alarms[activeAlarms-1].name, h, m, s, repeatDays);
+            showTime();
+          }
+        } else {
+          Serial.println("Maximum alarms reached");
+        }
+      }
+      else if (value.startsWith("SET:")) {
+        // Legacy single alarm support: SET:HH:MM:SS
         int h, m, s;
         if (sscanf(value.c_str() + 4, "%d:%d:%d", &h, &m, &s) == 3) {
-          alarmHour = h;
-          alarmMinute = m;
-          alarmSecond = s;
-          alarmEnabled = true;
-          alarmTriggered = false;
           
-          Serial.printf("Alarm set to %02d:%02d:%02d\n", alarmHour, alarmMinute, alarmSecond);
-          showTime(); // Update display to show alarm
+          // VALIDATE INPUT TO PREVENT CRASHES
+          if (h < 0 || h > 23) {
+            Serial.printf("ERROR: Invalid alarm hour %d (must be 0-23)\n", h);
+            return;
+          }
+          if (m < 0 || m > 59) {
+            Serial.printf("ERROR: Invalid alarm minute %d (must be 0-59)\n", m);
+            return;
+          }
+          if (s < 0 || s > 59) {
+            Serial.printf("ERROR: Invalid alarm second %d (must be 0-59)\n", s);
+            return;
+          }
+          
+          // Clear existing alarms and set one
+          activeAlarms = 1;
+          alarms[0].hour = h;
+          alarms[0].minute = m;
+          alarms[0].second = s;
+          alarms[0].enabled = true;
+          alarms[0].triggered = false;
+          alarms[0].repeatDays = 0; // One-time
+          strcpy(alarms[0].name, "QuickAlarm");
+          
+          Serial.printf("Set quick alarm: %02d:%02d:%02d\n", h, m, s);
+          showTime();
         }
-      } else if (value == "OFF") {
-        alarmEnabled = false;
-        alarmTriggered = false;
-        Serial.println("Alarm disabled");
+      }
+      else if (value.startsWith("DEL:")) {
+        // Format: DEL:index
+        int index = atoi(value.c_str() + 4);
+        if (index >= 0 && index < activeAlarms) {
+          // Shift alarms down
+          for (int i = index; i < activeAlarms - 1; i++) {
+            alarms[i] = alarms[i + 1];
+          }
+          activeAlarms--;
+          Serial.printf("Deleted alarm at index %d\n", index);
+          showTime();
+        }
+      }
+      else if (value == "OFF") {
+        // Disable all alarms
+        for (int i = 0; i < activeAlarms; i++) {
+          alarms[i].enabled = false;
+          alarms[i].triggered = false;
+        }
+        anyAlarmTriggered = false;
+        Serial.println("All alarms disabled");
         showTime();
-      } else if (value == "DISMISS") {
-        alarmTriggered = false;
-        Serial.println("Alarm dismissed");
+      }
+      else if (value == "DISMISS") {
+        // Stop all triggered alarms
+        for (int i = 0; i < activeAlarms; i++) {
+          alarms[i].triggered = false;
+        }
+        anyAlarmTriggered = false;
+        Serial.println("All alarms dismissed");
+        showTime();
+      }
+      else if (value == "CLEAR") {
+        // Remove all alarms
+        activeAlarms = 0;
+        anyAlarmTriggered = false;
+        Serial.println("All alarms cleared");
+        showTime();
+      }
+      else if (value == "LIST") {
+        // List all alarms
+        Serial.printf("Active alarms: %d\n", activeAlarms);
+        for (int i = 0; i < activeAlarms; i++) {
+          Serial.printf("%d: %s %02d:%02d:%02d %s repeat=%d\n",
+                        i, alarms[i].name, alarms[i].hour, alarms[i].minute, alarms[i].second,
+                        alarms[i].enabled ? "ON" : "OFF", alarms[i].repeatDays);
+        }
+      }
+    }
+  }
+};
+
+// ==== BLE font characteristic callback ====
+class FontCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      Serial.print("Received font selection: ");
+      Serial.println(value);
+
+      int fontNum = value.toInt();
+      if (fontNum >= 0 && fontNum <= 1) {
+        selectedTimeFont = fontNum;
+        Serial.printf("Font changed to: %d\n", selectedTimeFont);
+        showTime();
+      } else {
+        Serial.println("Invalid font number. Must be 0-1");
+      }
+    }
+  }
+};
+
+// ==== BLE custom font data characteristic callback ====
+class CustomFontCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String value = pCharacteristic->getValue();
+    if (value.length() == 0) return;
+    
+    Serial.print("Custom font data received: ");
+    Serial.println(value.substring(0, min(50, (int)value.length())));
+    
+    if (value.startsWith("START:")) {
+      // Parse: START:totalBytes:totalChunks (e.g., "START:1216:4")
+      int firstColon = value.indexOf(':', 6);  // Find colon after "START:"
+      
+      if (firstColon > 0) {
+        fontTransfer.totalBytes = value.substring(6, firstColon).toInt();
+        fontTransfer.totalChunks = value.substring(firstColon + 1).toInt();  // Read to end of string
+        fontTransfer.receivedBytes = 0;
+        fontTransfer.receivedChunks = 0;
+        fontTransfer.receiving = true;
+        
+        Serial.printf("📥 Starting custom font transfer: %d bytes in %d chunks\n", 
+                      fontTransfer.totalBytes, fontTransfer.totalChunks);
+      } else {
+        Serial.println("❌ Failed to parse START command");
+      }
+    }
+    else if (value.startsWith("CHUNK:")) {
+      // Parse: CHUNK:index:data (e.g., "CHUNK:0:binarydata...")
+      int firstColon = value.indexOf(':', 6);  // Find colon after "CHUNK:"
+      
+      if (firstColon > 0) {
+        int chunkIndex = value.substring(6, firstColon).toInt();
+        
+        // Extract binary data after the colon
+        int dataStart = firstColon + 1;
+        int dataLength = value.length() - dataStart;
+        
+        // Copy chunk data to custom font buffer
+        if (fontTransfer.receivedBytes + dataLength <= MAX_CUSTOM_FONT_SIZE) {
+          for (int i = 0; i < dataLength; i++) {
+            customPaintedFont[fontTransfer.receivedBytes + i] = (uint8_t)value[dataStart + i];
+          }
+          
+          fontTransfer.receivedBytes += dataLength;
+          fontTransfer.receivedChunks++;
+          
+          Serial.printf("📦 Received chunk %d (index %d) - %d bytes (total: %d/%d bytes, %d/%d chunks)\n", 
+                        fontTransfer.receivedChunks, chunkIndex, dataLength, 
+                        fontTransfer.receivedBytes, fontTransfer.totalBytes,
+                        fontTransfer.receivedChunks, fontTransfer.totalChunks);
+        } else {
+          Serial.println("❌ Custom font buffer overflow!");
+          fontTransfer.receiving = false;
+        }
+      } else {
+        Serial.println("❌ Failed to parse CHUNK command");
+      }
+    }
+    else if (value == "END") {
+      Serial.printf("END received - Chunks: %d/%d, Bytes: %d/%d\n",
+                    fontTransfer.receivedChunks, fontTransfer.totalChunks,
+                    fontTransfer.receivedBytes, fontTransfer.totalBytes);
+      
+      if (fontTransfer.receiving && fontTransfer.receivedChunks >= fontTransfer.totalChunks && fontTransfer.receivedBytes > 0) {
+        customFontSize = fontTransfer.receivedBytes;
+        customFontLoaded = true;
+        fontTransfer.receiving = false;
+        
+        Serial.printf("✅ Custom font loaded successfully! %d bytes\n", customFontSize);
+        Serial.println("📊 Font data (first 32 bytes):");
+        for (int i = 0; i < min(32, customFontSize); i++) {
+          Serial.printf("%02X ", customPaintedFont[i]);
+          if ((i + 1) % 16 == 0) Serial.println();
+        }
+        Serial.println();
+        Serial.println("✨ Select font #6 to use your custom painted font");
+        Serial.println("⚠️  Note: Font must be in U8g2 format to display correctly");
+        
+        // Display success message
+        u8g2.firstPage();
+        do {
+          u8g2.setFont(u8g2_font_profont15_tr);
+          u8g2.drawStr(10, 50, "Custom Font");
+          u8g2.drawStr(10, 70, "Uploaded!");
+          char sizeStr[30];
+          sprintf(sizeStr, "%d bytes", customFontSize);
+          u8g2.drawStr(10, 90, sizeStr);
+          u8g2.setFont(u8g2_font_profont10_tr);
+          u8g2.drawStr(10, 110, "Select font #6");
+        } while (u8g2.nextPage());
+        
+        delay(2000);
+        showTime();
+      } else {
+        Serial.printf("❌ Custom font transfer incomplete! Received %d/%d chunks, %d/%d bytes\n",
+                      fontTransfer.receivedChunks, fontTransfer.totalChunks,
+                      fontTransfer.receivedBytes, fontTransfer.totalBytes);
+        fontTransfer.receiving = false;
+      }
+    }
+  }
+};
+
+// ==== BLE date/time characteristic callback ====
+class DateTimeCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      Serial.print("Received date/time: ");
+      Serial.println(value);
+
+      // Format: YYYY-MM-DD:HH:MM:SS:DayOfWeek
+      // Example: 2025-11-15:14:30:00:5 (Friday)
+      int y, mo, d, h, mi, s, dow;
+      if (sscanf(value.c_str(), "%d-%d-%d:%d:%d:%d:%d", &y, &mo, &d, &h, &mi, &s, &dow) == 7) {
+        year = y;
+        month = mo;
+        day = d;
+        hours = h;
+        minutes = mi;
+        seconds = s;
+        dayOfWeek = dow;
+        
+        timeSet = true;
+        dateSet = true;
+        
+        // Reset all triggered alarms
+        for (int i = 0; i < activeAlarms; i++) {
+          alarms[i].triggered = false;
+        }
+        anyAlarmTriggered = false;
+        
+        showTime();
+        Serial.printf("Date and time updated: %04d-%02d-%02d %02d:%02d:%02d (%s)\n",
+                      year, month, day, hours, minutes, seconds, dayNames[dayOfWeek]);
+      } else {
+        Serial.println("Invalid date/time format. Expected YYYY-MM-DD:HH:MM:SS:DayOfWeek");
+      }
+    }
+  }
+};
+
+// ==== BLE timer characteristic callback ====
+class TimerCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      Serial.print("Received timer command: ");
+      Serial.println(value);
+
+      if (value.startsWith("SET:")) {
+        // Format: SET:HH:MM:SS
+        int h, m, s;
+        if (sscanf(value.c_str() + 4, "%d:%d:%d", &h, &m, &s) == 3) {
+          timerHours = h;
+          timerMinutes = m;
+          timerSeconds = s;
+          timerRunning = false;
+          timerFinished = false;
+          currentMode = MODE_TIMER;
+          Serial.printf("Timer set to %02d:%02d:%02d\n", h, m, s);
+          showTimer();
+        }
+      }
+      else if (value == "START") {
+        timerRunning = true;
+        timerFinished = false;
+        timerLastUpdate = millis();
+        currentMode = MODE_TIMER;
+        // Reset stopwatch when timer starts
+        stopwatchHours = 0;
+        stopwatchMinutes = 0;
+        stopwatchSeconds = 0;
+        stopwatchRunning = false;
+        Serial.println("Timer started");
+        showTimer();
+      }
+      else if (value == "PAUSE") {
+        timerRunning = false;
+        Serial.println("Timer paused");
+        showTimer();
+      }
+      else if (value == "RESET") {
+        timerHours = 0;
+        timerMinutes = 0;
+        timerSeconds = 0;
+        timerRunning = false;
+        timerFinished = false;
+        Serial.println("Timer reset");
+        showTimer();
+      }
+      else if (value == "DISMISS") {
+        timerFinished = false;
+        currentMode = MODE_CLOCK;
+        Serial.println("Timer dismissed, returning to clock");
+        showTime();
+      }
+    }
+  }
+};
+
+// ==== BLE stopwatch characteristic callback ====
+class StopwatchCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      Serial.print("Received stopwatch command: ");
+      Serial.println(value);
+
+      if (value == "START") {
+        stopwatchRunning = true;
+        stopwatchLastUpdate = millis();
+        currentMode = MODE_STOPWATCH;
+        // Reset timer when stopwatch starts
+        timerHours = 0;
+        timerMinutes = 0;
+        timerSeconds = 0;
+        timerRunning = false;
+        timerFinished = false;
+        Serial.println("Stopwatch started");
+        showStopwatch();
+      }
+      else if (value == "PAUSE") {
+        stopwatchRunning = false;
+        Serial.println("Stopwatch paused");
+        showStopwatch();
+      }
+      else if (value == "RESET") {
+        stopwatchHours = 0;
+        stopwatchMinutes = 0;
+        stopwatchSeconds = 0;
+        stopwatchRunning = false;
+        Serial.println("Stopwatch reset");
+        showStopwatch();
+      }
+      else if (value == "DISMISS") {
+        currentMode = MODE_CLOCK;
+        Serial.println("Stopwatch dismissed, returning to clock");
         showTime();
       }
     }
@@ -186,15 +1065,51 @@ void setup() {
   Serial.begin(115200);
   Serial.println("Starting BLE Clock...");
 
-  // ==== Init I2C & OLED ====
-  Wire.begin(8, 9);  // SDA=8, SCL=9 for ESP32-C3
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println("SSD1306 allocation failed!");
-    while (true);
-  }
+  // ==== Setup button ====
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  // ==== Init SH1107 OLED ====
+  u8g2.begin();
+  u8g2.setColorIndex(1); // set color to white
   
-  // Show initial time (00:00:00)
-  showTime();
+  // Display startup message with nice design
+  u8g2.firstPage();
+  do {
+    // Title
+    u8g2.setFont(u8g2_font_profont22_tr);
+    u8g2.setFontMode(1);
+    u8g2.setDrawColor(1);
+    
+    const char* title = "BLE Clock";
+    int titleWidth = u8g2.getStrWidth(title);
+    u8g2.drawStr((SCREEN_WIDTH - titleWidth) / 2, 35, title);
+    
+    // Status message
+    u8g2.setFont(u8g2_font_profont12_tr);
+    const char* message = "Waiting for";
+    const char* message2 = "time sync...";
+    
+    int msgWidth = u8g2.getStrWidth(message);
+    int msg2Width = u8g2.getStrWidth(message2);
+    
+    u8g2.drawStr((SCREEN_WIDTH - msgWidth) / 2, 65, message);
+    u8g2.drawStr((SCREEN_WIDTH - msg2Width) / 2, 80, message2);
+    
+    // Decorative elements
+    u8g2.drawRFrame(10, 15, SCREEN_WIDTH-20, 70, 5);
+    u8g2.drawHLine(30, 45, SCREEN_WIDTH-60);
+    
+    // Corner dots
+    u8g2.drawDisc(20, 25, 2);
+    u8g2.drawDisc(SCREEN_WIDTH-20, 25, 2);
+    u8g2.drawDisc(20, 75, 2);
+    u8g2.drawDisc(SCREEN_WIDTH-20, 75, 2);
+    
+    // BLE indicator
+    u8g2.setFont(u8g2_font_micro_tr);
+    u8g2.drawStr(5, 125, "BLE Ready");
+    
+  } while (u8g2.nextPage());
 
   // ==== Init BLE ====
   BLEDevice::init("ESP32 BLE Clock");
@@ -217,7 +1132,47 @@ void setup() {
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
   );
   pAlarmCharacteristic->setCallbacks(new AlarmCallbacks());
-  pAlarmCharacteristic->setValue("Send alarm as SET:HH:MM:SS or OFF");
+  pAlarmCharacteristic->setValue("Send alarm as ADD:HH:MM:SS:RepeatDays:Name");
+  
+  // Date/Time characteristic
+  BLECharacteristic *pDateTimeCharacteristic = pService->createCharacteristic(
+    DATE_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pDateTimeCharacteristic->setCallbacks(new DateTimeCallbacks());
+  pDateTimeCharacteristic->setValue("Send date/time as YYYY-MM-DD:HH:MM:SS:DayOfWeek");
+  
+  // Font characteristic
+  BLECharacteristic *pFontCharacteristic = pService->createCharacteristic(
+    FONT_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pFontCharacteristic->setCallbacks(new FontCallbacks());
+  pFontCharacteristic->setValue("Send font number 0-6");
+  
+  // Custom font data characteristic
+  BLECharacteristic *pCustomFontCharacteristic = pService->createCharacteristic(
+    CUSTOM_FONT_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pCustomFontCharacteristic->setCallbacks(new CustomFontCallbacks());
+  pCustomFontCharacteristic->setValue("Send custom font data in chunks");
+  
+  // Timer characteristic
+  BLECharacteristic *pTimerCharacteristic = pService->createCharacteristic(
+    TIMER_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pTimerCharacteristic->setCallbacks(new TimerCallbacks());
+  pTimerCharacteristic->setValue("Send timer commands: SET:HH:MM:SS, START, PAUSE, RESET, DISMISS");
+  
+  // Stopwatch characteristic
+  BLECharacteristic *pStopwatchCharacteristic = pService->createCharacteristic(
+    STOPWATCH_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pStopwatchCharacteristic->setCallbacks(new StopwatchCallbacks());
+  pStopwatchCharacteristic->setValue("Send stopwatch commands: START, PAUSE, RESET, DISMISS");
   
   pService->start();
 
@@ -234,16 +1189,64 @@ void setup() {
 void loop() {
   unsigned long now = millis();
   
-  // Always update time every second, even if not set via BLE
-  if (now - lastUpdate >= 1000) {
-    lastUpdate = now;
-    tick();
-    if (!alarmTriggered) {
-      showTime();
+  // Check button for dismissing alarms or timer
+  if (isButtonPressed()) {
+    delay(50);  // Debounce
+    if (isButtonPressed()) {
+      if (anyAlarmTriggered) {
+        // Dismiss all alarms
+        for (int i = 0; i < activeAlarms; i++) {
+          alarms[i].triggered = false;
+        }
+        anyAlarmTriggered = false;
+        Serial.println("Alarms dismissed by button");
+        showTime();
+        delay(200);  // Prevent multiple triggers
+      }
+      else if (timerFinished) {
+        // Dismiss timer
+        timerFinished = false;
+        currentMode = MODE_CLOCK;
+        Serial.println("Timer dismissed by button");
+        showTime();
+        delay(200);
+      }
     }
   }
   
-  if (alarmTriggered) {
-    flashScreen();
+  // Update timer
+  if (currentMode == MODE_TIMER && timerRunning && now - timerLastUpdate >= 1000) {
+    timerLastUpdate = now;
+    tickTimer();
+    if (!timerFinished) {
+      showTimer();
+    }
+  }
+  
+  // Flash timer when finished
+  if (timerFinished) {
+    flashTimer();
+  }
+  
+  // Update stopwatch
+  if (currentMode == MODE_STOPWATCH && stopwatchRunning && now - stopwatchLastUpdate >= 1000) {
+    stopwatchLastUpdate = now;
+    tickStopwatch();
+    showStopwatch();
+  }
+  
+  // Update clock
+  if (timeSet && currentMode == MODE_CLOCK) {
+    if (now - lastUpdate >= 1000) {
+      lastUpdate = now;
+      tick();
+      if (!anyAlarmTriggered) {
+        showTime();
+      }
+    }
+    
+    if (anyAlarmTriggered) {
+      flashScreen();
+    }
   }
 }

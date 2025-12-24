@@ -1,0 +1,9 @@
+/* 
+  InfoPlist.strings
+  TestBLE2
+  
+  Created on October 18, 2025.
+*/
+
+"NSBluetoothAlwaysUsageDescription" = "This app needs Bluetooth access to connect to your ESP32 device for controlling LED blinks.";
+"NSBluetoothPeripheralUsageDescription" = "This app needs Bluetooth access to connect to your ESP32 device for controlling LED blinks.";

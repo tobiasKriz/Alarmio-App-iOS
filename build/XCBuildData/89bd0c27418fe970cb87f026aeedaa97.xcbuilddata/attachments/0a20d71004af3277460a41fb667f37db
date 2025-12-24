@@ -1,0 +1,31 @@
+{
+  "" : {
+    "const-values" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2-primary.swiftconstvalues",
+    "dependencies" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2-primary.d",
+    "diagnostics" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2-primary.dia",
+    "emit-module-dependencies" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2-primary-emit-module.dia",
+    "pch" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2-primary.swiftdeps"
+  },
+  "/Users/tobias/Desktop/TestBLE2/TestBLE2/BLEManager.swift" : {
+    "index-unit-output-path" : "/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/BLEManager.o",
+    "llvm-bc" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/BLEManager.bc",
+    "object" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/BLEManager.o"
+  },
+  "/Users/tobias/Desktop/TestBLE2/TestBLE2/ContentView.swift" : {
+    "index-unit-output-path" : "/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/ContentView.o",
+    "llvm-bc" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/ContentView.bc",
+    "object" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/ContentView.o"
+  },
+  "/Users/tobias/Desktop/TestBLE2/TestBLE2/TestBLE2App.swift" : {
+    "index-unit-output-path" : "/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2App.o",
+    "llvm-bc" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2App.bc",
+    "object" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/TestBLE2App.o"
+  },
+  "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "index-unit-output-path" : "/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/tobias/Desktop/TestBLE2/build/TestBLE2.build/Release-iphoneos/TestBLE2.build/Objects-normal/arm64/GeneratedAssetSymbols.o"
+  }
+}
