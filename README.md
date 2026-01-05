@@ -62,6 +62,7 @@ The basic SH1107 OLED display setup and initialization code is based on [transpa
 
 ### AI
 **Claude Sonnet 4.5** was used to help build this project
+
 ---
 
 Built with SwiftUI and Arduino
