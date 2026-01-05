@@ -55,11 +55,16 @@ All ringtone melodies are based on arrangements from the [arduino-songs](https:/
 - Keyboard Cat
 - Für Elise (Beethoven)
 - Never Gonna Give You Up (Rick Astley)
-- The Legend of Zelda Theme
+- The Legend of Zelda Theme`
 
 ### Display Setup
 The basic SH1107 OLED display setup and initialization code is based on [transparent_oled_128x128px_sh1107](https://github.com/upiir/transparent_oled_128x128px_sh1107) by upiir.
 
+### AI
+**Claude Sonnet 4.5** was used to help build this project
 ---
 
 Built with SwiftUI and Arduino
+
+
+nothing possible without lil b the based god
