@@ -11,6 +11,7 @@ extern const uint8_t unifont_custom2[];  // BubblePark-derived
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 128
 #define BUTTON_PIN 9  // GPIO 9 for dismissing alarms and timer
+#define BUZZER_PIN 20  // GPIO 8 for piezo buzzer
 
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
@@ -20,6 +21,8 @@ extern const uint8_t unifont_custom2[];  // BubblePark-derived
 #define CUSTOM_FONT_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26ac" // New UUID for custom font data
 #define TIMER_UUID          "beb5483e-36e1-4688-b7f5-ea07361b26ad" // New UUID for timer
 #define STOPWATCH_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26ae" // New UUID for stopwatch
+#define BUZZER_UUID         "beb5483e-36e1-4688-b7f5-ea07361b26af" // New UUID for buzzer control
+#define RINGTONE_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26b0" // New UUID for ringtone data
 
 // Initialize U8G2 for SH1107 128x128 display with SPI connection
 U8G2_SH1107_PIMORONI_128X128_1_4W_HW_SPI u8g2(U8G2_R0, /*cs*/7, /*dc*/ 0, /*reset*/ 1);
@@ -95,6 +98,34 @@ unsigned long timerLastUpdate = 0;
 int stopwatchHours = 0, stopwatchMinutes = 0, stopwatchSeconds = 0;
 bool stopwatchRunning = false;
 unsigned long stopwatchLastUpdate = 0;
+
+// Buzzer variables
+bool buzzerEnabled = true;  // Buzzer on by default
+int buzzerVolume = 100;  // Volume percentage (0-100)
+unsigned long lastBuzzerBeep = 0;
+int buzzerBeepCount = 0;
+bool buzzerActive = false;
+
+// Ringtone melody storage
+#define MAX_MELODY_NOTES 512  // Maximum number of notes in a melody
+struct MelodyData {
+  int16_t notes[MAX_MELODY_NOTES];      // Note frequencies (2 bytes each)
+  int8_t durations[MAX_MELODY_NOTES];   // Note durations (1 byte each)
+  uint16_t noteCount;                    // Number of notes
+  uint16_t tempo;                        // Tempo (BPM)
+} melody;
+
+bool melodyLoaded = false;
+
+// Melody reception state
+struct MelodyTransfer {
+  bool receiving = false;
+  int totalBytes = 0;
+  int totalChunks = 0;
+  int receivedBytes = 0;
+  int receivedChunks = 0;
+  uint8_t* buffer = nullptr;
+} melodyTransfer;
 
 // ==== Display time with date ====
 void showTime() {
@@ -376,6 +407,140 @@ bool shouldAlarmTrigger(int index) {
 // ==== Check button press ====
 bool isButtonPressed() {
   return digitalRead(BUTTON_PIN) == LOW;  // Button pressed (assuming active LOW)
+}
+
+// ==== Buzzer control functions ====
+void playBuzzerTone(int frequency, int duration) {
+  if (!buzzerEnabled) return;
+  
+  // Scale tone based on volume setting
+  int scaledDuration = (duration * buzzerVolume) / 100;
+  if (scaledDuration > 0) {
+    tone(BUZZER_PIN, frequency, scaledDuration);
+  }
+}
+
+// Variables for melody playback
+unsigned long melodyStartTime = 0;
+unsigned long noteStartTime = 0;
+int currentMelodyNote = 0;
+bool melodyPlaying = false;
+bool noteIsPlaying = false;
+int currentNoteDuration = 0;
+
+void playMelody() {
+  if (!buzzerEnabled || !melodyLoaded) return;
+  
+  unsigned long currentMillis = millis();
+  
+  if (!melodyPlaying) {
+    // Start playing melody
+    melodyPlaying = true;
+    currentMelodyNote = 0;
+    noteIsPlaying = false;
+    melodyStartTime = currentMillis;
+    noteStartTime = currentMillis;
+  }
+  
+  // Calculate whole note duration in ms
+  int wholenote = (60000 * 4) / melody.tempo;
+  
+  // Check if current note has finished
+  if (noteIsPlaying && (currentMillis - noteStartTime >= currentNoteDuration)) {
+    // Move to next note
+    noteIsPlaying = false;
+    currentMelodyNote++;
+    
+    // If melody finished, restart from beginning after pause
+    if (currentMelodyNote >= melody.noteCount) {
+      currentMelodyNote = 0;
+      noteStartTime = currentMillis;
+      currentNoteDuration = 1000;  // 1 second pause before repeating
+      return;
+    }
+  }
+  
+  // Start playing next note
+  if (!noteIsPlaying && currentMelodyNote < melody.noteCount) {
+    // Get note frequency and duration
+    int16_t noteFreq = melody.notes[currentMelodyNote];
+    int8_t noteDuration = melody.durations[currentMelodyNote];
+    
+    // Calculate actual note duration
+    int actualDuration;
+    if (noteDuration > 0) {
+      actualDuration = wholenote / noteDuration;
+    } else {
+      // Dotted note (negative duration)
+      actualDuration = wholenote / abs(noteDuration);
+      actualDuration = (actualDuration * 3) / 2;  // 1.5x for dotted
+    }
+    
+    // Play note for 90% of duration, 10% pause
+    int playDuration = (actualDuration * 9 * buzzerVolume) / 1000;
+    
+    if (noteFreq > 0) {  // 0 = REST
+      tone(BUZZER_PIN, noteFreq, playDuration);
+    }
+    
+    noteIsPlaying = true;
+    noteStartTime = currentMillis;
+    currentNoteDuration = actualDuration;
+  }
+}
+
+void buzzerAlarmPattern() {
+  if (!buzzerEnabled || !anyAlarmTriggered) return;
+  
+  // Play melody if loaded, otherwise use default beep pattern
+  if (melodyLoaded) {
+    playMelody();
+  } else {
+    unsigned long currentMillis = millis();
+    
+    // Beep pattern: 3 quick beeps every 2 seconds
+    if (currentMillis - lastBuzzerBeep >= 2000) {
+      buzzerBeepCount = 0;
+      lastBuzzerBeep = currentMillis;
+      buzzerActive = true;
+    }
+    
+    if (buzzerActive && buzzerBeepCount < 3) {
+      if (currentMillis - lastBuzzerBeep >= buzzerBeepCount * 200) {
+        playBuzzerTone(2000, 100);  // 2000Hz for 100ms
+        buzzerBeepCount++;
+        if (buzzerBeepCount >= 3) {
+          buzzerActive = false;
+        }
+      }
+    }
+  }
+}
+
+void buzzerTimerPattern() {
+  if (!buzzerEnabled || !timerFinished) return;
+  
+  // Play melody if loaded, otherwise use default beep pattern
+  if (melodyLoaded) {
+    playMelody();
+  } else {
+    unsigned long currentMillis = millis();
+    
+    // Continuous beep pattern: beep every 1 second
+    if (currentMillis - lastBuzzerBeep >= 1000) {
+      playBuzzerTone(1500, 200);  // 1500Hz for 200ms
+      lastBuzzerBeep = currentMillis;
+    }
+  }
+}
+
+void stopBuzzer() {
+  noTone(BUZZER_PIN);
+  buzzerActive = false;
+  buzzerBeepCount = 0;
+  melodyPlaying = false;
+  noteIsPlaying = false;
+  currentMelodyNote = 0;
 }
 
 // ==== Flash screen for timer finished ====
@@ -1045,6 +1210,139 @@ class StopwatchCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+// ==== BLE buzzer characteristic callback ====
+class BuzzerCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      Serial.print("Received buzzer command: ");
+      Serial.println(value);
+
+      if (value == "ON") {
+        buzzerEnabled = true;
+        Serial.println("Buzzer enabled");
+      }
+      else if (value == "OFF") {
+        buzzerEnabled = false;
+        stopBuzzer();
+        Serial.println("Buzzer disabled");
+      }
+      else if (value.startsWith("VOLUME:")) {
+        // Format: VOLUME:0-100
+        int volume = value.substring(7).toInt();
+        if (volume >= 0 && volume <= 100) {
+          buzzerVolume = volume;
+          Serial.printf("Buzzer volume set to %d%%\n", buzzerVolume);
+        }
+      }
+      else if (value == "TEST") {
+        // Test buzzer with a short beep
+        playBuzzerTone(2000, 200);
+        Serial.println("Buzzer test");
+      }
+    }
+  }
+};
+
+// ==== Ringtone data reception callback ====
+class RingtoneCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      Serial.print("Received ringtone command: ");
+      Serial.println(value);
+
+      if (value.startsWith("START:")) {
+        // Format: START:totalBytes:totalChunks
+        int firstColon = value.indexOf(':');
+        int secondColon = value.indexOf(':', firstColon + 1);
+        
+        melodyTransfer.totalBytes = value.substring(firstColon + 1, secondColon).toInt();
+        melodyTransfer.totalChunks = value.substring(secondColon + 1).toInt();
+        
+        // Allocate buffer for melody data
+        if (melodyTransfer.buffer != nullptr) {
+          free(melodyTransfer.buffer);
+        }
+        melodyTransfer.buffer = (uint8_t*)malloc(melodyTransfer.totalBytes);
+        
+        melodyTransfer.receiving = true;
+        melodyTransfer.receivedBytes = 0;
+        melodyTransfer.receivedChunks = 0;
+        melodyLoaded = false;
+        
+        Serial.printf("Starting melody transfer: %d bytes in %d chunks\n", 
+                     melodyTransfer.totalBytes, melodyTransfer.totalChunks);
+      }
+      else if (value.startsWith("CHUNK:") && melodyTransfer.receiving) {
+        // Format: CHUNK:index:data...
+        int firstColon = value.indexOf(':');
+        int secondColon = value.indexOf(':', firstColon + 1);
+        
+        int chunkIndex = value.substring(firstColon + 1, secondColon).toInt();
+        String dataHex = value.substring(secondColon + 1);
+        
+        // Convert hex string to bytes
+        int chunkSize = dataHex.length() / 2;
+        uint8_t* chunkData = melodyTransfer.buffer + melodyTransfer.receivedBytes;
+        
+        for (int i = 0; i < chunkSize; i++) {
+          String byteStr = dataHex.substring(i * 2, i * 2 + 2);
+          chunkData[i] = (uint8_t)strtol(byteStr.c_str(), NULL, 16);
+        }
+        
+        melodyTransfer.receivedBytes += chunkSize;
+        melodyTransfer.receivedChunks++;
+        
+        Serial.printf("Received chunk %d/%d (%d bytes)\n", 
+                     melodyTransfer.receivedChunks, melodyTransfer.totalChunks, chunkSize);
+      }
+      else if (value == "END" && melodyTransfer.receiving) {
+        melodyTransfer.receiving = false;
+        
+        if (melodyTransfer.receivedBytes == melodyTransfer.totalBytes && 
+            melodyTransfer.receivedChunks == melodyTransfer.totalChunks) {
+          
+          // Parse melody data from buffer
+          // Format: tempo (2 bytes) + noteCount (2 bytes) + notes array + durations array
+          uint16_t* data16 = (uint16_t*)melodyTransfer.buffer;
+          melody.tempo = data16[0];
+          melody.noteCount = data16[1];
+          
+          Serial.printf("Melody received: tempo=%d, notes=%d\n", melody.tempo, melody.noteCount);
+          
+          if (melody.noteCount <= MAX_MELODY_NOTES) {
+            // Copy notes (2 bytes each)
+            int16_t* notesData = (int16_t*)(melodyTransfer.buffer + 4);
+            for (int i = 0; i < melody.noteCount; i++) {
+              melody.notes[i] = notesData[i];
+            }
+            
+            // Copy durations (1 byte each, after all notes)
+            int8_t* durationsData = (int8_t*)(melodyTransfer.buffer + 4 + (melody.noteCount * 2));
+            for (int i = 0; i < melody.noteCount; i++) {
+              melody.durations[i] = durationsData[i];
+            }
+            
+            melodyLoaded = true;
+            Serial.println("Melody loaded successfully!");
+          } else {
+            Serial.printf("ERROR: Too many notes (%d > %d)\n", melody.noteCount, MAX_MELODY_NOTES);
+          }
+        } else {
+          Serial.println("ERROR: Melody transfer incomplete");
+        }
+        
+        // Free transfer buffer
+        if (melodyTransfer.buffer != nullptr) {
+          free(melodyTransfer.buffer);
+          melodyTransfer.buffer = nullptr;
+        }
+      }
+    }
+  }
+};
+
 // ==== BLE server callback ====
 class MyServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *pServer) override {
@@ -1067,6 +1365,10 @@ void setup() {
 
   // ==== Setup button ====
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  
+  // ==== Setup buzzer ====
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 
   // ==== Init SH1107 OLED ====
   u8g2.begin();
@@ -1174,6 +1476,22 @@ void setup() {
   pStopwatchCharacteristic->setCallbacks(new StopwatchCallbacks());
   pStopwatchCharacteristic->setValue("Send stopwatch commands: START, PAUSE, RESET, DISMISS");
   
+  // Buzzer characteristic
+  BLECharacteristic *pBuzzerCharacteristic = pService->createCharacteristic(
+    BUZZER_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pBuzzerCharacteristic->setCallbacks(new BuzzerCallbacks());
+  pBuzzerCharacteristic->setValue("Send buzzer commands: ON, OFF, VOLUME:0-100, TEST");
+  
+  // Ringtone characteristic
+  BLECharacteristic *pRingtoneCharacteristic = pService->createCharacteristic(
+    RINGTONE_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pRingtoneCharacteristic->setCallbacks(new RingtoneCallbacks());
+  pRingtoneCharacteristic->setValue("Send ringtone data: START:bytes:chunks, CHUNK:index:data, END");
+  
   pService->start();
 
   pAdvertising = BLEDevice::getAdvertising();
@@ -1199,6 +1517,7 @@ void loop() {
           alarms[i].triggered = false;
         }
         anyAlarmTriggered = false;
+        stopBuzzer();  // Stop buzzer sound
         Serial.println("Alarms dismissed by button");
         showTime();
         delay(200);  // Prevent multiple triggers
@@ -1206,6 +1525,7 @@ void loop() {
       else if (timerFinished) {
         // Dismiss timer
         timerFinished = false;
+        stopBuzzer();  // Stop buzzer sound
         currentMode = MODE_CLOCK;
         Serial.println("Timer dismissed by button");
         showTime();
@@ -1226,6 +1546,7 @@ void loop() {
   // Flash timer when finished
   if (timerFinished) {
     flashTimer();
+    buzzerTimerPattern();  // Play buzzer pattern
   }
   
   // Update stopwatch
@@ -1247,6 +1568,7 @@ void loop() {
     
     if (anyAlarmTriggered) {
       flashScreen();
+      buzzerAlarmPattern();  // Play buzzer pattern
     }
   }
 }

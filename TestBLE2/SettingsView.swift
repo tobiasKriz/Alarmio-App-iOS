@@ -28,9 +28,10 @@ struct SettingsView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
                 
-                VStack(spacing: 0) {
-                    // Automatic Home Clock Setting
-                    VStack(alignment: .leading, spacing: 8) {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        // Automatic Home Clock Setting
+                        VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Automatic Time Sync")
                                 .font(.system(size: 17, weight: .regular))
@@ -153,6 +154,166 @@ struct SettingsView: View {
                     Divider()
                         .background(Color(white: 0.3))
                     
+                    // Buzzer Settings
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Buzzer Settings")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(.white)
+                        
+                        // Buzzer enable/disable
+                        HStack {
+                            Text("Enable Buzzer")
+                                .font(.system(size: 17, weight: .regular))
+                                .foregroundColor(.white)
+                            
+                            Spacer()
+                            
+                            Toggle("", isOn: $bleManager.buzzerEnabled)
+                                .labelsHidden()
+                                .tint(.green)
+                        }
+                        
+                        if bleManager.buzzerEnabled {
+                            // Volume slider
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text("Volume")
+                                        .font(.system(size: 15, weight: .regular))
+                                        .foregroundColor(.white.opacity(0.8))
+                                    
+                                    Spacer()
+                                    
+                                    Text("\(Int(bleManager.buzzerVolume))%")
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .foregroundColor(.white)
+                                        .frame(width: 50, alignment: .trailing)
+                                }
+                                
+                                Slider(value: $bleManager.buzzerVolume, in: 0...100, step: 10)
+                                    .tint(.blue)
+                            }
+                            .padding(.top, 8)
+                            
+                            // Test buzzer button
+                            Button {
+                                bleManager.testBuzzer()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "speaker.wave.2")
+                                    Text("Test Buzzer")
+                                        .font(.system(size: 16, weight: .semibold))
+                                }
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(
+                                    LinearGradient(
+                                        colors: [Color.blue.opacity(0.7), Color.blue],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .cornerRadius(12)
+                            }
+                            .padding(.top, 8)
+                        }
+                        
+                        Text(bleManager.buzzerEnabled ? "Buzzer will sound for alarms and timer." : "Buzzer is disabled. Only visual alerts will show.")
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundColor(.white.opacity(0.6))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .background(Color(white: 0.15))
+                    
+                    Divider()
+                        .background(Color(white: 0.3))
+                    
+                    // Ringtone Settings
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Ringtone")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(.white)
+                        
+                        Text("Select a ringtone for alarms and timer")
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundColor(.white.opacity(0.6))
+                        
+                        // Ringtone picker
+                        Picker("Ringtone", selection: $bleManager.selectedRingtone) {
+                            ForEach(RingtoneLibrary.shared.ringtones, id: \.name) { ringtone in
+                                Text(ringtone.name).tag(ringtone.name)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(.blue)
+                        
+                        // Upload button
+                        Button {
+                            bleManager.uploadRingtone(bleManager.selectedRingtone)
+                        } label: {
+                            HStack {
+                                if bleManager.ringtoneUploading {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                        .scaleEffect(0.8)
+                                } else {
+                                    Image(systemName: "arrow.up.circle")
+                                }
+                                
+                                Text(bleManager.ringtoneUploading ? "Sending..." : "Send to ESP32")
+                                    .font(.system(size: 16, weight: .semibold))
+                            }
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(
+                                LinearGradient(
+                                    colors: bleManager.ringtoneUploading ? 
+                                        [Color.gray.opacity(0.7), Color.gray] :
+                                        [Color.green.opacity(0.7), Color.green],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .cornerRadius(12)
+                        }
+                        .disabled(bleManager.ringtoneUploading || !bleManager.isConnected)
+                        
+                        // Upload progress
+                        if bleManager.ringtoneUploading {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("Progress:")
+                                        .font(.system(size: 13))
+                                        .foregroundColor(.white.opacity(0.6))
+                                    
+                                    Spacer()
+                                    
+                                    Text("\(Int(bleManager.ringtoneUploadProgress * 100))%")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.white)
+                                }
+                                
+                                ProgressView(value: bleManager.ringtoneUploadProgress)
+                                    .progressViewStyle(LinearProgressViewStyle(tint: .green))
+                            }
+                            .padding(.top, 8)
+                        }
+                        
+                        Text("Ringtone will play when alarm or timer triggers.")
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundColor(.white.opacity(0.6))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .background(Color(white: 0.15))
+                    
+                    Divider()
+                        .background(Color(white: 0.3))
+                    
                     // BLE Connection Status
                     VStack(alignment: .leading, spacing: 8) {
                         Text("BLE Connection")
@@ -191,6 +352,7 @@ struct SettingsView: View {
                     Spacer()
                 }
                 .padding(.top, 20)
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)

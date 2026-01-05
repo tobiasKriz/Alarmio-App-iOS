@@ -58,6 +58,25 @@ class BLEManager: NSObject, ObservableObject {
             }
         }
     }
+    
+    // Buzzer settings
+    @Published var buzzerEnabled: Bool = true {
+        didSet {
+            UserDefaults.standard.set(buzzerEnabled, forKey: "buzzerEnabled")
+            if isConnected {
+                sendBuzzerState()
+            }
+        }
+    }
+    
+    @Published var buzzerVolume: Double = 100 {
+        didSet {
+            UserDefaults.standard.set(buzzerVolume, forKey: "buzzerVolume")
+            if isConnected {
+                sendBuzzerVolume()
+            }
+        }
+    }
 
     // Target device name
     private let targetDeviceName = "ESP32 BLE Clock"  // Updated to match Arduino name
@@ -71,6 +90,8 @@ class BLEManager: NSObject, ObservableObject {
     private let customFontCharacteristicUUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26ac")  // Added for custom font data
     private let timerCharacteristicUUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26ad")  // Added for timer
     private let stopwatchCharacteristicUUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26ae")  // Added for stopwatch
+    private let buzzerCharacteristicUUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26af")  // Added for buzzer
+    private let ringtoneCharacteristicUUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26b0")  // Added for ringtone
     
     // Characteristics
     private var dateTimeCharacteristic: CBCharacteristic?
@@ -78,6 +99,17 @@ class BLEManager: NSObject, ObservableObject {
     private var customFontCharacteristic: CBCharacteristic?
     private var timerCharacteristic: CBCharacteristic?
     private var stopwatchCharacteristic: CBCharacteristic?
+    private var buzzerCharacteristic: CBCharacteristic?
+    private var ringtoneCharacteristic: CBCharacteristic?
+    
+    // Ringtone upload state
+    @Published var ringtoneUploading = false
+    @Published var ringtoneUploadProgress: Double = 0.0
+    @Published var selectedRingtone: String = "Nokia" {
+        didSet {
+            UserDefaults.standard.set(selectedRingtone, forKey: "selectedRingtone")
+        }
+    }
     
     // Local alarm management
     @Published var localAlarms: [LocalAlarm] = []
@@ -194,6 +226,10 @@ class BLEManager: NSObject, ObservableObject {
         
         // Load saved font selection
         selectedFont = UserDefaults.standard.object(forKey: "selectedFont") as? Int ?? 0
+        
+        // Load saved buzzer settings
+        buzzerEnabled = UserDefaults.standard.object(forKey: "buzzerEnabled") as? Bool ?? true
+        buzzerVolume = UserDefaults.standard.object(forKey: "buzzerVolume") as? Double ?? 100
         
         // Load saved local alarms
         loadLocalAlarms()
@@ -646,6 +682,128 @@ class BLEManager: NSObject, ObservableObject {
             print("✅ Stopwatch dismissed")
         }
     }
+    
+    // MARK: - Buzzer Methods
+    
+    func sendBuzzerState() {
+        guard isConnected, let peripheral = peripheral, let characteristic = buzzerCharacteristic else {
+            statusMessage = "Not connected or buzzer characteristic not found"
+            return
+        }
+        
+        let command = buzzerEnabled ? "ON" : "OFF"
+        if let data = command.data(using: .ascii) {
+            peripheral.writeValue(data, for: characteristic, type: .withResponse)
+            print("✅ Buzzer \(command)")
+        }
+    }
+    
+    func sendBuzzerVolume() {
+        guard isConnected, let peripheral = peripheral, let characteristic = buzzerCharacteristic else {
+            statusMessage = "Not connected or buzzer characteristic not found"
+            return
+        }
+        
+        let command = "VOLUME:\(Int(buzzerVolume))"
+        if let data = command.data(using: .ascii) {
+            peripheral.writeValue(data, for: characteristic, type: .withResponse)
+            print("✅ Buzzer volume set to \(Int(buzzerVolume))%")
+        }
+    }
+    
+    func testBuzzer() {
+        guard isConnected, let peripheral = peripheral, let characteristic = buzzerCharacteristic else {
+            statusMessage = "Not connected or buzzer characteristic not found"
+            return
+        }
+        
+        if let data = "TEST".data(using: .ascii) {
+            peripheral.writeValue(data, for: characteristic, type: .withResponse)
+            print("✅ Buzzer test")
+        }
+    }
+    
+    // MARK: - Ringtone Upload
+    func uploadRingtone(_ ringtoneName: String) {
+        guard isConnected, let peripheral = peripheral, let characteristic = ringtoneCharacteristic else {
+            statusMessage = "Not connected or ringtone characteristic not found"
+            return
+        }
+        
+        // Find the ringtone by name
+        guard let ringtone = RingtoneLibrary.shared.ringtones.first(where: { $0.name == ringtoneName }) else {
+            print("❌ Ringtone not found: \(ringtoneName)")
+            return
+        }
+        
+        // Convert ringtone to binary data
+        let melodyData = ringtone.toData()
+        let totalBytes = melodyData.count
+        let chunkSize = 180  // BLE safe chunk size (leave room for protocol overhead)
+        let totalChunks = (totalBytes + chunkSize - 1) / chunkSize
+        
+        print("📤 Starting ringtone upload: \(ringtoneName)")
+        print("   Total bytes: \(totalBytes), Chunks: \(totalChunks)")
+        
+        ringtoneUploading = true
+        ringtoneUploadProgress = 0.0
+        
+        // Send START command
+        let startCommand = "START:\(totalBytes):\(totalChunks)"
+        if let data = startCommand.data(using: .ascii) {
+            peripheral.writeValue(data, for: characteristic, type: .withResponse)
+            print("✅ Sent START: \(startCommand)")
+        }
+        
+        // Send chunks with delay
+        var chunkIndex = 0
+        var bytesSent = 0
+        
+        func sendNextChunk() {
+            guard chunkIndex < totalChunks else {
+                // All chunks sent, send END command
+                if let endData = "END".data(using: .ascii) {
+                    peripheral.writeValue(endData, for: characteristic, type: .withResponse)
+                    print("✅ Sent END command")
+                }
+                
+                DispatchQueue.main.async {
+                    self.ringtoneUploading = false
+                    self.ringtoneUploadProgress = 1.0
+                    self.statusMessage = "Ringtone uploaded: \(ringtoneName)"
+                }
+                return
+            }
+            
+            let start = bytesSent
+            let end = min(start + chunkSize, totalBytes)
+            let chunkData = melodyData.subdata(in: start..<end)
+            let hexString = chunkData.map { String(format: "%02x", $0) }.joined()
+            
+            let chunkCommand = "CHUNK:\(chunkIndex):\(hexString)"
+            if let data = chunkCommand.data(using: .ascii) {
+                peripheral.writeValue(data, for: characteristic, type: .withResponse)
+                print("✅ Sent chunk \(chunkIndex + 1)/\(totalChunks) (\(chunkData.count) bytes)")
+            }
+            
+            bytesSent = end
+            chunkIndex += 1
+            
+            DispatchQueue.main.async {
+                self.ringtoneUploadProgress = Double(chunkIndex) / Double(totalChunks)
+            }
+            
+            // Schedule next chunk
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                sendNextChunk()
+            }
+        }
+        
+        // Start sending chunks after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            sendNextChunk()
+        }
+    }
 }
 
 // MARK: - Hex Data Extension
@@ -786,6 +944,12 @@ extension BLEManager: CBPeripheralDelegate {
             } else if characteristic.uuid == stopwatchCharacteristicUUID {
                 stopwatchCharacteristic = characteristic
                 print("✅ Found stopwatch characteristic: \(characteristic.uuid)")
+            } else if characteristic.uuid == buzzerCharacteristicUUID {
+                buzzerCharacteristic = characteristic
+                print("✅ Found buzzer characteristic: \(characteristic.uuid)")
+            } else if characteristic.uuid == ringtoneCharacteristicUUID {
+                ringtoneCharacteristic = characteristic
+                print("✅ Found ringtone characteristic: \(characteristic.uuid)")
             } else {
                 print("ℹ️ Found unknown characteristic: \(characteristic.uuid)")
             }
@@ -816,6 +980,12 @@ extension BLEManager: CBPeripheralDelegate {
             // Send current font selection
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
                 self.sendFontSelection()
+            }
+            
+            // Send buzzer settings
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                self.sendBuzzerState()
+                self.sendBuzzerVolume()
             }
             
             // Auto-sync all alarms to ESP32
