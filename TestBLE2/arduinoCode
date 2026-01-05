@@ -11,7 +11,7 @@ extern const uint8_t unifont_custom2[];  // BubblePark-derived
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 128
 #define BUTTON_PIN 9  // GPIO 9 for dismissing alarms and timer
-#define BUZZER_PIN 20  // GPIO 8 for piezo buzzer
+#define BUZZER_PIN 20  // GPIO 20 for piezo buzzer
 
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
